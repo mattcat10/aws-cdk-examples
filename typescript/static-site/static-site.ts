@@ -6,7 +6,7 @@ import s3deploy = require('@aws-cdk/aws-s3-deployment');
 import acm = require('@aws-cdk/aws-certificatemanager');
 import cdk = require('@aws-cdk/core');
 import targets = require('@aws-cdk/aws-route53-targets/lib');
-import { Construct, Stack, Aws } from '@aws-cdk/core';
+import { Construct, Stack } from '@aws-cdk/core';
 
 export interface StaticSiteProps {
     domainName: string;
