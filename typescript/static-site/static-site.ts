@@ -6,11 +6,13 @@ import s3deploy = require('@aws-cdk/aws-s3-deployment');
 import acm = require('@aws-cdk/aws-certificatemanager');
 import cdk = require('@aws-cdk/core');
 import targets = require('@aws-cdk/aws-route53-targets/lib');
-import { Construct } from '@aws-cdk/core';
+import { Construct, Stack, Aws } from '@aws-cdk/core';
 
 export interface StaticSiteProps {
     domainName: string;
     siteSubDomain: string;
+    siteContentPath: string;
+    siteBucketName: string
 }
 
 /**
@@ -29,43 +31,62 @@ export class StaticSite extends Construct {
 
         // Content bucket
         const siteBucket = new s3.Bucket(this, 'SiteBucket', {
-            bucketName: siteDomain,
+            bucketName: `${Stack.of(this).account}-${Stack.of(this).region}-${props.siteBucketName}`,
             websiteIndexDocument: 'index.html',
             websiteErrorDocument: 'error.html',
-            publicReadAccess: true,
-
-            // The default removal policy is RETAIN, which means that cdk destroy will not attempt to delete
-            // the new bucket, and it will remain in your account until manually deleted. By setting the policy to
-            // DESTROY, cdk destroy will attempt to delete the bucket, but will error if the bucket is not empty.
-            removalPolicy: cdk.RemovalPolicy.DESTROY, // NOT recommended for production code
+            publicReadAccess: false,
+            blockPublicAccess: { blockPublicPolicy: true, ignorePublicAcls: true, restrictPublicBuckets: true, blockPublicAcls: false },
+            versioned: true,
+            removalPolicy: cdk.RemovalPolicy.RETAIN, 
         });
+
         new cdk.CfnOutput(this, 'Bucket', { value: siteBucket.bucketName });
 
         // TLS certificate
-        const certificateArn = new acm.DnsValidatedCertificate(this, 'SiteCertificate', {
+        const certificate = new acm.DnsValidatedCertificate(this, 'SiteCertificate', {
             domainName: siteDomain,
             hostedZone: zone,
             region: 'us-east-1', // Cloudfront only checks this region for certificates.
-        }).certificateArn;
-        new cdk.CfnOutput(this, 'Certificate', { value: certificateArn });
+        });
+        new cdk.CfnOutput(this, 'Certificate', { value: certificate.certificateArn });
+
+        const cloudfrontOriginAccessIdentity = new cloudfront.OriginAccessIdentity(this, 'OAI', {
+            comment: siteBucket.bucketName
+        })
 
         // CloudFront distribution that provides HTTPS
         const distribution = new cloudfront.CloudFrontWebDistribution(this, 'SiteDistribution', {
             aliasConfiguration: {
-                acmCertRef: certificateArn,
+                acmCertRef: certificate.certificateArn,
                 names: [ siteDomain ],
                 sslMethod: cloudfront.SSLMethod.SNI,
                 securityPolicy: cloudfront.SecurityPolicyProtocol.TLS_V1_1_2016,
             },
             originConfigs: [
                 {
+                    s3OriginSource: { originAccessIdentity: cloudfrontOriginAccessIdentity, s3BucketSource: siteBucket },
                     customOriginSource: {
                         domainName: siteBucket.bucketWebsiteDomainName,
                         originProtocolPolicy: cloudfront.OriginProtocolPolicy.HTTP_ONLY,
                     },          
                     behaviors : [ {isDefaultBehavior: true}],
                 }
-            ]
+            ],
+            httpVersion: cloudfront.HttpVersion.HTTP2,
+            defaultRootObject: 'index.html',
+            errorConfigurations: [
+                {
+                    errorCode: 404,
+                    responseCode: 200,
+                    responsePagePath: 'index.html'
+                },
+                {
+                    errorCode: 403,
+                    responseCode: 200,
+                    responsePagePath: 'index.html'
+                }
+            ],
+            viewerCertificate: cloudfront.ViewerCertificate.fromAcmCertificate(certificate)
         });
         new cdk.CfnOutput(this, 'DistributionId', { value: distribution.distributionId });
 
@@ -78,7 +99,7 @@ export class StaticSite extends Construct {
 
         // Deploy site contents to S3 bucket
         new s3deploy.BucketDeployment(this, 'DeployWithInvalidation', {
-            sources: [ s3deploy.Source.asset('./site-contents') ],
+            sources: [ s3deploy.Source.asset(props.siteContentPath) ],
             destinationBucket: siteBucket,
             distribution,
             distributionPaths: ['/*'],
